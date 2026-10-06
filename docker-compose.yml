@@ -1,0 +1,103 @@
+# ==============================================================================
+# UniRide (CTMS v2.0) - Local Development Multi-Container Orchestrator
+# Mirrors Production Stack: Supabase (Postgres+PostGIS), Upstash (Redis),
+# Railway (Django ASGI Backend + C# DSA Microservice)
+# ==============================================================================
+version: "3.9"
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. PostgreSQL 16 with PostGIS Spatial Extension (Mirrors Supabase)
+  # ----------------------------------------------------------------------------
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: uniride-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: uniride_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - uniride-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d uniride_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # 2. Redis Cache & WebSocket Channel Layer (Mirrors Upstash)
+  # ----------------------------------------------------------------------------
+  redis:
+    image: redis:7.2-alpine
+    container_name: uniride-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    networks:
+      - uniride-network
+    healthcheck:
+      test: ["CMD", "redis-ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # 3. High-Performance C# .NET 10 DSA Microservice (Mirrors Railway Private Svc)
+  # ----------------------------------------------------------------------------
+  dsa-service:
+    build:
+      context: ./dsa_service_csharp
+      dockerfile: Dockerfile
+    container_name: uniride-dsa-service
+    restart: unless-stopped
+    ports:
+      - "5050:5050"
+    environment:
+      - ASPNETCORE_URLS=http://+:5050
+      - ASPNETCORE_ENVIRONMENT=Development
+    networks:
+      - uniride-network
+
+  # ----------------------------------------------------------------------------
+  # 4. Core Django 5.x ASGI Web Backend (Mirrors Railway Web Svc)
+  # ----------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend_django
+      dockerfile: Dockerfile
+    container_name: uniride-django-backend
+    restart: unless-stopped
+    command: daphne -b 0.0.0.0 -p 8000 uniride.asgi:application
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=True
+      - SECRET_KEY=django-insecure-dev-local-secret-key-uniride-2026
+      - DATABASE_URL=postgresql://postgres:postgrespassword@db:5432/uniride_db
+      - REDIS_URL=redis://redis:6379/0
+      - DSA_SERVICE_URL=http://dsa-service:5050
+      - CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      dsa-service:
+        condition: service_started
+    networks:
+      - uniride-network
+
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  uniride-network:
+    driver: bridge
